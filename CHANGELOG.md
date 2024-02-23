@@ -13,6 +13,10 @@ Unreleased` header.
 
 - On X11, fix use after free during xinput2 handling.
 - On X11, filter close to zero values in mouse device events
+- Deprecate `EventLoop::run` in favor of `EventLoop::run_app`.
+- Deprecate `EventLoopExtRunOnDemand::run_on_demand` in favor of `EventLoop::run_app_on_demand`.
+- Deprecate `EventLoopExtPumpEvents::pump_events` in favor of `EventLoopExtPumpEvents::pump_app_events`.
+- Add `ApplicationHandler<T>` trait which mimics `Event<T>`.
 - Move `dpi` types to its own crate, and re-export it from the root crate.
 - Implement `Sync` for `EventLoopProxy<T: Send>`.
 - **Breaking:** Move `Window::new` to `ActiveEventLoop::create_window` and `EventLoop::create_window` (with the latter being deprecated).
