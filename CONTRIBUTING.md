@@ -56,7 +56,7 @@ To achieve these goals, a new branch is created for every new release. Releases 
 The exact steps for an exemplary `0.2.0` release might look like this:
   1. Initially, the version on the latest master is `0.1.0`
   2. A new `v0.2.x` branch is created for the release
-  3. In the branch, the version is bumped to `v0.2.0`
+  3. In the branch, the version is bumped to `v0.2.0` (including the link to the `current` changelog file)
   4. The new commit in the branch is tagged `v0.2.0`
   5. The version is pushed to crates.io
   6. A GitHub release is created for the `v0.2.0` tag
