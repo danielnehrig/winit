@@ -10,21 +10,22 @@
 //! let mut start_cause = StartCause::Init;
 //!
 //! while !elwt.exiting() {
-//!     event_handler(NewEvents(start_cause), elwt);
+//!     app.new_events(event_loop, start_cause);
 //!
-//!     for e in (window events, user events, device events) {
-//!         event_handler(e, elwt);
+//!     for event in (window events, user events, device events) {
+//!         // This will pick the right method on the application based on the event.
+//!         app.handle_event(event_loop, event);
 //!     }
 //!
-//!     for w in (redraw windows) {
-//!         event_handler(RedrawRequested(w), elwt);
+//!     for window_id in (redraw windows) {
+//!         app.window_event(event_loop, window_id, RedrawRequested);
 //!     }
 //!
-//!     event_handler(AboutToWait, elwt);
+//!     app.about_to_wait(event_loop);
 //!     start_cause = wait_if_necessary();
 //! }
 //!
-//! event_handler(LoopExiting, elwt);
+//! app.loop_exiting(event_loop);
 //! ```
 //!
 //! This leaves out timing details like [`ControlFlow::WaitUntil`] but hopefully
