@@ -39,7 +39,7 @@ is that a PR must be approved by at least two maintainers of winit before being 
 at least a maintainer of the platform (a maintainer making a PR themselves counts as approving it).
 
 Once your PR is deemed ready, the merging maintainer will take care of resolving conflicts in the
-`__changelog` module (but you must resolve other conflicts yourself). Doing this requires that you check the
+`changelog` module (but you must resolve other conflicts yourself). Doing this requires that you check the
 "give contributors write access to the branch" checkbox when creating the PR.
 
 ## Maintainers

@@ -201,7 +201,7 @@ pub use rwh_06 as raw_window_handle;
 pub use dpi;
 
 #[cfg(any(doc, doctest, test))]
-pub mod __changelog;
+pub mod changelog;
 #[macro_use]
 pub mod error;
 mod cursor;
