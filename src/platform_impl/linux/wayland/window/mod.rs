@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sctk::reexports::calloop;
 use sctk::reexports::client::protocol::wl_display::WlDisplay;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::Proxy;
@@ -33,7 +32,7 @@ use super::event_loop::sink::EventSink;
 use super::output::MonitorHandle;
 use super::state::WinitState;
 use super::types::xdg_activation::XdgActivationTokenData;
-use super::{EventLoopWindowTarget, WaylandError, WindowId};
+use super::{ActiveEventLoop, WaylandError, WindowId};
 
 pub(crate) mod state;
 
@@ -81,7 +80,7 @@ pub struct Window {
 
 impl Window {
     pub(crate) fn new(
-        event_loop_window_target: &EventLoopWindowTarget,
+        event_loop_window_target: &ActiveEventLoop,
         attributes: WindowAttributes,
     ) -> Result<Self, RootOsError> {
         let queue_handle = event_loop_window_target.queue_handle.clone();

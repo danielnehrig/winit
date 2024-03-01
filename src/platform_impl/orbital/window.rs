@@ -13,8 +13,7 @@ use crate::{
 };
 
 use super::{
-    EventLoopWindowTarget, MonitorHandle, OsError, RedoxSocket, TimeSocket, WindowId,
-    WindowProperties,
+    ActiveEventLoop, MonitorHandle, OsError, RedoxSocket, TimeSocket, WindowId, WindowProperties,
 };
 
 // These values match the values uses in the `window_new` function in orbital:
@@ -37,7 +36,7 @@ pub struct Window {
 
 impl Window {
     pub(crate) fn new(
-        el: &EventLoopWindowTarget,
+        el: &ActiveEventLoop,
         attrs: window::WindowAttributes,
     ) -> Result<Self, error::OsError> {
         let scale = MonitorHandle.scale_factor();
@@ -489,7 +488,7 @@ impl Window {
     pub fn raw_window_handle_rwh_06(&self) -> Result<rwh_06::RawWindowHandle, rwh_06::HandleError> {
         let handle = rwh_06::OrbitalWindowHandle::new({
             let window = self.window_socket.fd as *mut _;
-            std::ptr::NonNull::new(window).expect("orbital fd shoul never be null")
+            std::ptr::NonNull::new(window).expect("orbital fd should never be null")
         });
         Ok(rwh_06::RawWindowHandle::Orbital(handle))
     }

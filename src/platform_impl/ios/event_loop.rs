@@ -20,25 +20,33 @@ use crate::{
     error::EventLoopError,
     event::Event,
     event_loop::{
-        ControlFlow, DeviceEvents, EventLoopClosed,
-        EventLoopWindowTarget as RootEventLoopWindowTarget,
+        ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents, EventLoopClosed,
     },
     platform::ios::Idiom,
     platform_impl::platform::app_state::{EventLoopHandler, HandlePendingUserEvents},
+    window::{CustomCursor, CustomCursorSource},
 };
 
-use super::{app_state, monitor, view, MonitorHandle};
+use super::{app_delegate::AppDelegate, uikit::UIUserInterfaceIdiom};
+use super::{app_state, monitor, MonitorHandle};
 use super::{
     app_state::AppState,
     uikit::{UIApplication, UIApplicationMain, UIDevice, UIScreen},
 };
 
 #[derive(Debug)]
-pub struct EventLoopWindowTarget {
+pub struct ActiveEventLoop {
     pub(super) mtm: MainThreadMarker,
 }
 
-impl EventLoopWindowTarget {
+impl ActiveEventLoop {
+    pub fn create_custom_cursor(&self, source: CustomCursorSource) -> CustomCursor {
+        let _ = source.inner;
+        CustomCursor {
+            inner: super::PlatformCustomCursor,
+        }
+    }
+
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
         monitor::uiscreens(self.mtm)
     }
@@ -76,7 +84,7 @@ impl EventLoopWindowTarget {
 
     pub(crate) fn exit(&self) {
         // https://developer.apple.com/library/archive/qa/qa1561/_index.html
-        // it is not possible to quit an iOS app gracefully and programatically
+        // it is not possible to quit an iOS app gracefully and programmatically
         log::warn!("`ControlFlow::Exit` ignored on iOS");
     }
 
@@ -109,9 +117,9 @@ impl OwnedDisplayHandle {
 }
 
 fn map_user_event<T: 'static>(
-    mut handler: impl FnMut(Event<T>, &RootEventLoopWindowTarget),
+    mut handler: impl FnMut(Event<T>, &RootActiveEventLoop),
     receiver: mpsc::Receiver<T>,
-) -> impl FnMut(Event<HandlePendingUserEvents>, &RootEventLoopWindowTarget) {
+) -> impl FnMut(Event<HandlePendingUserEvents>, &RootActiveEventLoop) {
     move |event, window_target| match event.map_nonuser_event() {
         Ok(event) => (handler)(event, window_target),
         Err(_) => {
@@ -126,7 +134,7 @@ pub struct EventLoop<T: 'static> {
     mtm: MainThreadMarker,
     sender: Sender<T>,
     receiver: Receiver<T>,
-    window_target: RootEventLoopWindowTarget,
+    window_target: RootActiveEventLoop,
 }
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -158,8 +166,8 @@ impl<T: 'static> EventLoop<T> {
             mtm,
             sender,
             receiver,
-            window_target: RootEventLoopWindowTarget {
-                p: EventLoopWindowTarget { mtm },
+            window_target: RootActiveEventLoop {
+                p: ActiveEventLoop { mtm },
                 _marker: PhantomData,
             },
         })
@@ -167,7 +175,7 @@ impl<T: 'static> EventLoop<T> {
 
     pub fn run<F>(self, handler: F) -> !
     where
-        F: FnMut(Event<T>, &RootEventLoopWindowTarget),
+        F: FnMut(Event<T>, &RootActiveEventLoop),
     {
         let application = UIApplication::shared(self.mtm);
         assert!(
@@ -181,8 +189,8 @@ impl<T: 'static> EventLoop<T> {
 
         let handler = unsafe {
             std::mem::transmute::<
-                Box<dyn FnMut(Event<HandlePendingUserEvents>, &RootEventLoopWindowTarget)>,
-                Box<dyn FnMut(Event<HandlePendingUserEvents>, &RootEventLoopWindowTarget)>,
+                Box<dyn FnMut(Event<HandlePendingUserEvents>, &RootActiveEventLoop)>,
+                Box<dyn FnMut(Event<HandlePendingUserEvents>, &RootActiveEventLoop)>,
             >(Box::new(handler))
         };
 
@@ -194,14 +202,14 @@ impl<T: 'static> EventLoop<T> {
         app_state::will_launch(self.mtm, handler);
 
         // Ensure application delegate is initialized
-        view::WinitApplicationDelegate::class();
+        let _ = AppDelegate::class();
 
         unsafe {
             UIApplicationMain(
                 0,
                 ptr::null(),
                 None,
-                Some(&NSString::from_str("WinitApplicationDelegate")),
+                Some(&NSString::from_str(AppDelegate::NAME)),
             )
         };
         unreachable!()
@@ -211,7 +219,7 @@ impl<T: 'static> EventLoop<T> {
         EventLoopProxy::new(self.sender.clone())
     }
 
-    pub fn window_target(&self) -> &RootEventLoopWindowTarget {
+    pub fn window_target(&self) -> &RootActiveEventLoop {
         &self.window_target
     }
 }
@@ -219,7 +227,14 @@ impl<T: 'static> EventLoop<T> {
 // EventLoopExtIOS
 impl<T: 'static> EventLoop<T> {
     pub fn idiom(&self) -> Idiom {
-        UIDevice::current(self.mtm).userInterfaceIdiom().into()
+        match UIDevice::current(self.mtm).userInterfaceIdiom() {
+            UIUserInterfaceIdiom::Unspecified => Idiom::Unspecified,
+            UIUserInterfaceIdiom::Phone => Idiom::Phone,
+            UIUserInterfaceIdiom::Pad => Idiom::Pad,
+            UIUserInterfaceIdiom::TV => Idiom::TV,
+            UIUserInterfaceIdiom::CarPlay => Idiom::CarPlay,
+            _ => Idiom::Unspecified,
+        }
     }
 }
 
@@ -229,6 +244,7 @@ pub struct EventLoopProxy<T> {
 }
 
 unsafe impl<T: Send> Send for EventLoopProxy<T> {}
+unsafe impl<T: Send> Sync for EventLoopProxy<T> {}
 
 impl<T> Clone for EventLoopProxy<T> {
     fn clone(&self) -> EventLoopProxy<T> {

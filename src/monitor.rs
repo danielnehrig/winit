@@ -3,7 +3,7 @@
 //! If you want to get basic information about a monitor, you can use the
 //! [`MonitorHandle`] type. This is retrieved from one of the following
 //! methods, which return an iterator of [`MonitorHandle`]:
-//! - [`EventLoopWindowTarget::available_monitors`](crate::event_loop::EventLoopWindowTarget::available_monitors).
+//! - [`ActiveEventLoop::available_monitors`](crate::event_loop::ActiveEventLoop::available_monitors).
 //! - [`Window::available_monitors`](crate::window::Window::available_monitors).
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -145,7 +145,7 @@ impl MonitorHandle {
     /// Returns the scale factor of the underlying monitor. To map logical pixels to physical
     /// pixels and vice versa, use [`Window::scale_factor`].
     ///
-    /// See the [`dpi`](crate::dpi) module for more information.
+    /// See the [`dpi`] module for more information.
     ///
     /// ## Platform-specific
     ///

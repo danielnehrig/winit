@@ -5,27 +5,103 @@ use std::collections::VecDeque;
 use icrate::Foundation::{CGFloat, CGPoint, CGRect, CGSize, MainThreadBound, MainThreadMarker};
 use log::{debug, warn};
 use objc2::rc::Id;
-use objc2::runtime::AnyObject;
-use objc2::{class, msg_send};
+use objc2::runtime::{AnyObject, NSObject};
+use objc2::{class, declare_class, msg_send, msg_send_id, mutability, ClassType, DeclaredClass};
 
 use super::app_state::EventWrapper;
-use super::uikit::{UIApplication, UIScreen, UIScreenOverscanCompensation};
-use super::view::{WinitUIWindow, WinitView, WinitViewController};
+use super::uikit::{
+    UIApplication, UIResponder, UIScreen, UIScreenOverscanCompensation, UIViewController, UIWindow,
+};
+use super::view::WinitView;
+use super::view_controller::WinitViewController;
 use crate::{
     cursor::Cursor,
-    dpi::{self, LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
     event::{Event, WindowEvent},
     icon::Icon,
     platform::ios::{ScreenEdge, StatusBarStyle, ValidOrientations},
-    platform_impl::platform::{
-        app_state, monitor, EventLoopWindowTarget, Fullscreen, MonitorHandle,
-    },
+    platform_impl::platform::{app_state, monitor, ActiveEventLoop, Fullscreen, MonitorHandle},
     window::{
         CursorGrabMode, ImePurpose, ResizeDirection, Theme, UserAttentionType, WindowAttributes,
         WindowButtons, WindowId as RootWindowId, WindowLevel,
     },
 };
+
+declare_class!(
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    pub(crate) struct WinitUIWindow;
+
+    unsafe impl ClassType for WinitUIWindow {
+        #[inherits(UIResponder, NSObject)]
+        type Super = UIWindow;
+        type Mutability = mutability::InteriorMutable;
+        const NAME: &'static str = "WinitUIWindow";
+    }
+
+    impl DeclaredClass for WinitUIWindow {}
+
+    unsafe impl WinitUIWindow {
+        #[method(becomeKeyWindow)]
+        fn become_key_window(&self) {
+            let mtm = MainThreadMarker::new().unwrap();
+            app_state::handle_nonuser_event(
+                mtm,
+                EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id: RootWindowId(self.id()),
+                    event: WindowEvent::Focused(true),
+                }),
+            );
+            let _: () = unsafe { msg_send![super(self), becomeKeyWindow] };
+        }
+
+        #[method(resignKeyWindow)]
+        fn resign_key_window(&self) {
+            let mtm = MainThreadMarker::new().unwrap();
+            app_state::handle_nonuser_event(
+                mtm,
+                EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id: RootWindowId(self.id()),
+                    event: WindowEvent::Focused(false),
+                }),
+            );
+            let _: () = unsafe { msg_send![super(self), resignKeyWindow] };
+        }
+    }
+);
+
+impl WinitUIWindow {
+    pub(crate) fn new(
+        mtm: MainThreadMarker,
+        window_attributes: &WindowAttributes,
+        frame: CGRect,
+        view_controller: &UIViewController,
+    ) -> Id<Self> {
+        let this: Id<Self> = unsafe { msg_send_id![Self::alloc(), initWithFrame: frame] };
+
+        this.setRootViewController(Some(view_controller));
+
+        match window_attributes.fullscreen.clone().map(Into::into) {
+            Some(Fullscreen::Exclusive(ref video_mode)) => {
+                let monitor = video_mode.monitor();
+                let screen = monitor.ui_screen(mtm);
+                screen.setCurrentMode(Some(video_mode.screen_mode(mtm)));
+                this.setScreen(screen);
+            }
+            Some(Fullscreen::Borderless(Some(ref monitor))) => {
+                let screen = monitor.ui_screen(mtm);
+                this.setScreen(screen);
+            }
+            _ => (),
+        }
+
+        this
+    }
+
+    pub(crate) fn id(&self) -> WindowId {
+        (self as *const Self as usize as u64).into()
+    }
+}
 
 pub struct Inner {
     window: Id<WinitUIWindow>,
@@ -399,7 +475,7 @@ pub struct Window {
 
 impl Window {
     pub(crate) fn new(
-        event_loop: &EventLoopWindowTarget,
+        event_loop: &ActiveEventLoop,
         window_attributes: WindowAttributes,
     ) -> Result<Window, RootOsError> {
         let mtm = event_loop.mtm;
@@ -461,7 +537,7 @@ impl Window {
             let screen = window.screen();
             let screen_space = screen.coordinateSpace();
             let screen_frame = view.convertRect_toCoordinateSpace(bounds, &screen_space);
-            let size = crate::dpi::LogicalSize {
+            let size = LogicalSize {
                 width: screen_frame.size.width as f64,
                 height: screen_frame.size.height as f64,
             };
@@ -552,7 +628,7 @@ impl Inner {
 
     pub fn set_preferred_screen_edges_deferring_system_gestures(&self, edges: ScreenEdge) {
         self.view_controller
-            .set_preferred_screen_edges_deferring_system_gestures(edges.into());
+            .set_preferred_screen_edges_deferring_system_gestures(edges);
     }
 
     pub fn set_prefers_status_bar_hidden(&self, hidden: bool) {
@@ -561,7 +637,7 @@ impl Inner {
 
     pub fn set_preferred_status_bar_style(&self, status_bar_style: StatusBarStyle) {
         self.view_controller
-            .set_preferred_status_bar_style(status_bar_style.into());
+            .set_preferred_status_bar_style(status_bar_style);
     }
 
     pub fn recognize_pinch_gesture(&self, should_recognize: bool) {
@@ -678,7 +754,7 @@ impl From<&AnyObject> for WindowId {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct PlatformSpecificWindowBuilderAttributes {
+pub struct PlatformSpecificWindowAttributes {
     pub scale_factor: Option<f64>,
     pub valid_orientations: ValidOrientations,
     pub prefers_home_indicator_hidden: bool,

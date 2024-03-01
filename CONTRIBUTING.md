@@ -42,11 +42,9 @@ Once your PR is deemed ready, the merging maintainer will take care of resolving
 `__changelog` module (but you must resolve other conflicts yourself). Doing this requires that you check the
 "give contributors write access to the branch" checkbox when creating the PR.
 
-## Maintainers & Testers
+## Maintainers
 
-The current maintainers are listed in the [CODEOWNERS](.github/CODEOWNERS) file.
-
-If you are interested in being pinged when testing is needed for a specific platform, please add yourself to the [Testers and Contributors](https://github.com/rust-windowing/winit/wiki/Testers-and-Contributors) table!
+The current maintainers for each platform are listed in the [CODEOWNERS](.github/CODEOWNERS) file.
 
 ## Release process
 

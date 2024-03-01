@@ -2,22 +2,15 @@
 //!
 //! # Building windows
 //!
-//! Before you can build a [`Window`], you first need to build an [`EventLoop`]. This is done with the
-//! [`EventLoop::new()`] function.
+//! Before you can create a [`Window`], you first need to build an [`EventLoop`]. This is done with
+//! the [`EventLoop::new()`] function.
 //!
 //! ```no_run
 //! use winit::event_loop::EventLoop;
 //! let event_loop = EventLoop::new().unwrap();
 //! ```
 //!
-//! Once this is done, there are two ways to create a [`Window`]:
-//!
-//!  - Calling [`Window::new(&event_loop)`][window_new].
-//!  - Calling [`let builder = Window::builder()`][window_builder_new] then [`builder.build(&event_loop)`][window_builder_build].
-//!
-//! The first method is the simplest and will give you default values for everything. The second
-//! method allows you to customize the way your [`Window`] will look and behave by modifying the
-//! fields of the [`WindowBuilder`] object before you create the [`Window`].
+//! Then you create a [`Window`] with [`create_window`].
 //!
 //! # Event handling
 //!
@@ -67,7 +60,6 @@
 //! };
 //!
 //! let event_loop = EventLoop::new().unwrap();
-//! let window = Window::builder().build(&event_loop).unwrap();
 //!
 //! // ControlFlow::Poll continuously runs the event loop, even if the OS hasn't
 //! // dispatched any events. This is ideal for games and similar applications.
@@ -78,14 +70,19 @@
 //! // input, and uses significantly less power/CPU time than ControlFlow::Poll.
 //! event_loop.set_control_flow(ControlFlow::Wait);
 //!
-//! event_loop.run(move |event, elwt| {
+//! let mut window = None;
+//!
+//! event_loop.run(move |event, event_loop| {
 //!     match event {
+//!         Event::Resumed => {
+//!             window = Some(event_loop.create_window(Window::default_attributes()).unwrap());
+//!         }
 //!         Event::WindowEvent {
 //!             event: WindowEvent::CloseRequested,
 //!             ..
 //!         } => {
 //!             println!("The close button was pressed; stopping");
-//!             elwt.exit();
+//!             event_loop.exit();
 //!         },
 //!         Event::AboutToWait => {
 //!             // Application update code.
@@ -95,7 +92,7 @@
 //!             // You only need to call this if you've determined that you need to redraw in
 //!             // applications which do not always need to. Applications that redraw continuously
 //!             // can render here instead.
-//!             window.request_redraw();
+//!             window.as_ref().unwrap().request_redraw();
 //!         },
 //!         Event::WindowEvent {
 //!             event: WindowEvent::RedrawRequested,
@@ -126,19 +123,54 @@
 //! Note that many platforms will display garbage data in the window's client area if the
 //! application doesn't render anything to the window by the time the desktop compositor is ready to
 //! display the window to the user. If you notice this happening, you should create the window with
-//! [`visible` set to `false`](crate::window::WindowBuilder::with_visible) and explicitly make the
+//! [`visible` set to `false`](crate::window::WindowAttributes::with_visible) and explicitly make the
 //! window visible only once you're ready to render into it.
+//!
+//! # UI scaling
+//!
+//! UI scaling is important, go read the docs for the [`dpi`] crate for an
+//! introduction.
+//!
+//! All of Winit's functions return physical types, but can take either logical or physical
+//! coordinates as input, allowing you to use the most convenient coordinate system for your
+//! particular application.
+//!
+//! Winit will dispatch a [`ScaleFactorChanged`] event whenever a window's scale factor has changed.
+//! This can happen if the user drags their window from a standard-resolution monitor to a high-DPI
+//! monitor or if the user changes their DPI settings. This allows you to rescale your application's
+//! UI elements and adjust how the platform changes the window's size to reflect the new scale
+//! factor. If a window hasn't received a [`ScaleFactorChanged`] event, its scale factor
+//! can be found by calling [`window.scale_factor()`].
+//!
+//! [`ScaleFactorChanged`]: event::WindowEvent::ScaleFactorChanged
+//! [`window.scale_factor()`]: window::Window::scale_factor
+//!
+//! # Cargo Features
+//!
+//! Winit provides the following Cargo features:
+//!
+//! * `x11` (enabled by default): On Unix platforms, enables the X11 backend.
+//! * `wayland` (enabled by default): On Unix platforms, enables the Wayland
+//!   backend.
+//! * `rwh_04`: Implement `raw-window-handle v0.4` traits.
+//! * `rwh_05`: Implement `raw-window-handle v0.5` traits.
+//! * `rwh_06`: Implement `raw-window-handle v0.6` traits.
+//! * `serde`: Enables serialization/deserialization of certain types with
+//!   [Serde](https://crates.io/crates/serde).
+//! * `mint`: Enables mint (math interoperability standard types) conversions.
+//!
+//! See the [`platform`] module for documentation on platform-specific cargo
+//! features.
 //!
 //! [`EventLoop`]: event_loop::EventLoop
 //! [`EventLoop::new()`]: event_loop::EventLoop::new
 //! [`EventLoop::run()`]: event_loop::EventLoop::run
-//! [`exit()`]: event_loop::EventLoopWindowTarget::exit
+//! [`exit()`]: event_loop::ActiveEventLoop::exit
 //! [`Window`]: window::Window
 //! [`WindowId`]: window::WindowId
-//! [`WindowBuilder`]: window::WindowBuilder
+//! [`WindowAttributes`]: window::WindowAttributes
 //! [window_new]: window::Window::new
-//! [window_builder_new]: window::Window::builder
-//! [window_builder_build]: window::WindowBuilder::build
+//! [`create_window`]: event_loop::ActiveEventLoop::create_window
 //! [`Window::id()`]: window::Window::id
 //! [`WindowEvent`]: event::WindowEvent
 //! [`DeviceEvent`]: event::DeviceEvent
@@ -152,7 +184,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::all)]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(feature = "cargo-clippy", deny(warnings))]
+#![cfg_attr(clippy, deny(warnings))]
 // Doc feature labels can be tested locally by running RUSTDOCFLAGS="--cfg=docsrs" cargo +nightly doc
 #![cfg_attr(
     docsrs,
@@ -164,9 +196,12 @@
 #[cfg(feature = "rwh_06")]
 pub use rwh_06 as raw_window_handle;
 
+// Re-export DPI types so that users don't have to put it in Cargo.toml.
+#[doc(inline)]
+pub use dpi;
+
 #[cfg(any(doc, doctest, test))]
 pub mod __changelog;
-pub mod dpi;
 #[macro_use]
 pub mod error;
 mod cursor;
@@ -176,6 +211,7 @@ mod icon;
 pub mod keyboard;
 pub mod monitor;
 mod platform_impl;
+mod utils;
 pub mod window;
 
 pub mod platform;

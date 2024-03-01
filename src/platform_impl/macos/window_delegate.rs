@@ -44,7 +44,7 @@ use crate::window::{
 };
 
 #[derive(Clone, Debug)]
-pub struct PlatformSpecificWindowBuilderAttributes {
+pub struct PlatformSpecificWindowAttributes {
     pub movable_by_window_background: bool,
     pub titlebar_transparent: bool,
     pub title_hidden: bool,
@@ -58,7 +58,7 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub option_as_alt: OptionAsAlt,
 }
 
-impl Default for PlatformSpecificWindowBuilderAttributes {
+impl Default for PlatformSpecificWindowAttributes {
     #[inline]
     fn default() -> Self {
         Self {
@@ -104,7 +104,7 @@ pub(crate) struct State {
     /// bar in exclusive fullscreen but want to restore the original options when
     /// transitioning back to borderless fullscreen.
     save_presentation_opts: Cell<Option<NSApplicationPresentationOptions>>,
-    // This is set when WindowBuilder::with_fullscreen was set,
+    // This is set when WindowAttributes::with_fullscreen was set,
     // see comments of `window_did_fail_to_enter_fullscreen`
     initial_fullscreen: Cell<bool>,
     /// This field tracks the current fullscreen state of the window
@@ -300,12 +300,12 @@ declare_class!(
         /// Invoked when fail to enter fullscreen
         ///
         /// When this window launch from a fullscreen app (e.g. launch from VS Code
-        /// terminal), it creates a new virtual destkop and a transition animation.
+        /// terminal), it creates a new virtual desktop and a transition animation.
         /// This animation takes one second and cannot be disable without
         /// elevated privileges. In this animation time, all toggleFullscreen events
         /// will be failed. In this implementation, we will try again by using
         /// performSelector:withObject:afterDelay: until window_did_enter_fullscreen.
-        /// It should be fine as we only do this at initialzation (i.e with_fullscreen
+        /// It should be fine as we only do this at initialization (i.e with_fullscreen
         /// was set).
         ///
         /// From Apple doc:
@@ -1128,7 +1128,7 @@ impl WindowDelegate {
 
     pub(crate) fn is_zoomed(&self) -> bool {
         // because `isZoomed` doesn't work if the window's borderless,
-        // we make it resizable temporalily.
+        // we make it resizable temporarily.
         let curr_mask = self.window().styleMask();
 
         let required = NSWindowStyleMaskTitled | NSWindowStyleMaskResizable;
@@ -1492,7 +1492,7 @@ impl WindowDelegate {
         // only be used when the window is in some way representing a specific
         // file/directory. For instance, Terminal.app uses this for the CWD.
         // Anyway, that should eventually be implemented as
-        // `WindowBuilderExt::with_represented_file` or something, and doesn't
+        // `WindowAttributesExt::with_represented_file` or something, and doesn't
         // have anything to do with `set_window_icon`.
         // https://developer.apple.com/library/content/documentation/Cocoa/Conceptual/WinPanel/Tasks/SettingWindowTitle.html
     }

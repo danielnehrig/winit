@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use once_cell::sync::Lazy;
+use crate::utils::Lazy;
 
 use windows_sys::Win32::{
     Devices::HumanInterfaceDevice::MOUSE_MOVE_RELATIVE,
@@ -74,13 +74,14 @@ use crate::{
         DeviceEvent, Event, Force, Ime, InnerSizeWriter, RawKeyEvent, Touch, TouchPhase,
         WindowEvent,
     },
-    event_loop::{ControlFlow, DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootELW},
+    event_loop::{ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents, EventLoopClosed},
     keyboard::ModifiersState,
     platform::pump_events::PumpStatus,
     platform_impl::platform::{
         dark_mode::try_theme,
         dpi::{become_dpi_aware, dpi_to_scale_factor},
         drop_handler::FileDropHandler,
+        icon::WinCursor,
         ime::ImeContext,
         keyboard::KeyEventBuilder,
         keyboard_layout::LAYOUT_CACHE,
@@ -90,7 +91,7 @@ use crate::{
         window_state::{CursorFlags, ImeState, WindowFlags, WindowState},
         wrap_device_id, Fullscreen, WindowId, DEVICE_ID,
     },
-    window::WindowId as RootWindowId,
+    window::{CustomCursor as RootCustomCursor, CustomCursorSource, WindowId as RootWindowId},
 };
 use runner::{EventLoopRunner, EventLoopRunnerShared};
 
@@ -156,7 +157,7 @@ pub(crate) enum ProcResult {
 pub struct EventLoop<T: 'static> {
     user_event_sender: Sender<T>,
     user_event_receiver: Receiver<T>,
-    window_target: RootELW,
+    window_target: RootAEL,
     msg_hook: Option<Box<dyn FnMut(*const c_void) -> bool + 'static>>,
 }
 
@@ -176,7 +177,7 @@ impl Default for PlatformSpecificEventLoopAttributes {
     }
 }
 
-pub struct EventLoopWindowTarget {
+pub struct ActiveEventLoop {
     thread_id: u32,
     thread_msg_target: HWND,
     pub(crate) runner_shared: EventLoopRunnerShared<UserEventPlaceholder>,
@@ -215,8 +216,8 @@ impl<T: 'static> EventLoop<T> {
         Ok(EventLoop {
             user_event_sender,
             user_event_receiver,
-            window_target: RootELW {
-                p: EventLoopWindowTarget {
+            window_target: RootAEL {
+                p: ActiveEventLoop {
                     thread_id,
                     thread_msg_target,
                     runner_shared,
@@ -227,20 +228,20 @@ impl<T: 'static> EventLoop<T> {
         })
     }
 
-    pub fn window_target(&self) -> &RootELW {
+    pub fn window_target(&self) -> &RootAEL {
         &self.window_target
     }
 
     pub fn run<F>(mut self, event_handler: F) -> Result<(), EventLoopError>
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         self.run_on_demand(event_handler)
     }
 
     pub fn run_on_demand<F>(&mut self, mut event_handler: F) -> Result<(), EventLoopError>
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         {
             let runner = &self.window_target.p.runner_shared;
@@ -302,7 +303,7 @@ impl<T: 'static> EventLoop<T> {
 
     pub fn pump_events<F>(&mut self, timeout: Option<Duration>, mut event_handler: F) -> PumpStatus
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         {
             let runner = &self.window_target.p.runner_shared;
@@ -427,7 +428,7 @@ impl<T: 'static> EventLoop<T> {
         // The Windows API has no documented requirement for bitwise
         // initializing a `MSG` struct (it can be uninitialized memory for the C
         // API) and there's no API to construct or initialize a `MSG`. This
-        // is the simplest way avoid unitialized memory in Rust
+        // is the simplest way avoid uninitialized memory in Rust
         let mut msg = unsafe { mem::zeroed() };
         let msg_status = wait_for_msg(&mut msg, timeout);
 
@@ -475,7 +476,7 @@ impl<T: 'static> EventLoop<T> {
         // The Windows API has no documented requirement for bitwise
         // initializing a `MSG` struct (it can be uninitialized memory for the C
         // API) and there's no API to construct or initialize a `MSG`. This
-        // is the simplest way avoid unitialized memory in Rust
+        // is the simplest way avoid uninitialized memory in Rust
         let mut msg = unsafe { mem::zeroed() };
 
         loop {
@@ -522,13 +523,25 @@ impl<T: 'static> EventLoop<T> {
     }
 }
 
-impl EventLoopWindowTarget {
+impl ActiveEventLoop {
     #[inline(always)]
     pub(crate) fn create_thread_executor(&self) -> EventLoopThreadExecutor {
         EventLoopThreadExecutor {
             thread_id: self.thread_id,
             target_window: self.thread_msg_target,
         }
+    }
+
+    pub fn create_custom_cursor(&self, source: CustomCursorSource) -> RootCustomCursor {
+        let inner = match WinCursor::new(&source.inner.0) {
+            Ok(cursor) => cursor,
+            Err(err) => {
+                log::warn!("Failed to create custom cursor: {err}");
+                WinCursor::Failed
+            }
+        };
+
+        RootCustomCursor { inner }
     }
 
     // TODO: Investigate opportunities for caching
@@ -835,16 +848,16 @@ static USER_EVENT_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::WakeupMsg\0
 static EXEC_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::ExecMsg\0");
 // Message sent by a `Window` when it wants to be destroyed by the main thread.
 // WPARAM and LPARAM are unused.
-pub static DESTROY_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::DestroyMsg\0");
+pub(crate) static DESTROY_MSG_ID: LazyMessageId = LazyMessageId::new("Winit::DestroyMsg\0");
 // WPARAM is a bool specifying the `WindowFlags::MARKER_RETAIN_STATE_ON_SIZE` flag. See the
 // documentation in the `window_state` module for more information.
-pub static SET_RETAIN_STATE_ON_SIZE_MSG_ID: LazyMessageId =
+pub(crate) static SET_RETAIN_STATE_ON_SIZE_MSG_ID: LazyMessageId =
     LazyMessageId::new("Winit::SetRetainMaximized\0");
 static THREAD_EVENT_TARGET_WINDOW_CLASS: Lazy<Vec<u16>> =
     Lazy::new(|| util::encode_wide("Winit Thread Event Target"));
 /// When the taskbar is created, it registers a message with the "TaskbarCreated" string and then broadcasts this message to all top-level windows
 /// <https://docs.microsoft.com/en-us/windows/win32/shell/taskbar#taskbar-creation-notification>
-pub static TASKBAR_CREATED: LazyMessageId = LazyMessageId::new("TaskbarCreated\0");
+pub(crate) static TASKBAR_CREATED: LazyMessageId = LazyMessageId::new("TaskbarCreated\0");
 
 fn create_event_target_window() -> HWND {
     use windows_sys::Win32::UI::WindowsAndMessaging::CS_HREDRAW;
@@ -1102,7 +1115,7 @@ unsafe fn public_window_callback_inner(
         .unwrap_or_else(|| result = ProcResult::Value(-1));
 
     // I decided to bind the closure to `callback` and pass it to catch_unwind rather than passing
-    // the closure to catch_unwind directly so that the match body indendation wouldn't change and
+    // the closure to catch_unwind directly so that the match body indentation wouldn't change and
     // the git blame and history would be preserved.
     let callback = || match msg {
         WM_NCCALCSIZE => {
@@ -2381,7 +2394,7 @@ unsafe extern "system" fn thread_event_target_callback(
     let mut userdata_removed = false;
 
     // I decided to bind the closure to `callback` and pass it to catch_unwind rather than passing
-    // the closure to catch_unwind directly so that the match body indendation wouldn't change and
+    // the closure to catch_unwind directly so that the match body indentation wouldn't change and
     // the git blame and history would be preserved.
     let callback = || match msg {
         WM_NCDESTROY => {
@@ -2391,7 +2404,7 @@ unsafe extern "system" fn thread_event_target_callback(
         }
         WM_PAINT => unsafe {
             ValidateRect(window, ptr::null());
-            // Default WM_PAINT behaviour. This makes sure modals and popups are shown immediatly when opening them.
+            // Default WM_PAINT behaviour. This makes sure modals and popups are shown immediately when opening them.
             DefWindowProcW(window, msg, wparam, lparam)
         },
 

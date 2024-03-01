@@ -1,3 +1,7 @@
+use std::ffi::c_uchar;
+use std::slice;
+use std::sync::OnceLock;
+
 use icrate::AppKit::{NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSImage};
 use icrate::Foundation::{
     ns_string, NSData, NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSSize,
@@ -6,13 +10,9 @@ use icrate::Foundation::{
 use objc2::rc::Id;
 use objc2::runtime::Sel;
 use objc2::{msg_send_id, sel, ClassType};
-use once_cell::sync::Lazy;
-use std::ffi::c_uchar;
-use std::slice;
 
-use super::EventLoopWindowTarget;
 use crate::cursor::CursorImage;
-use crate::cursor::OnlyCursorImageBuilder;
+use crate::cursor::OnlyCursorImageSource;
 use crate::window::CursorIcon;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -24,7 +24,7 @@ unsafe impl Send for CustomCursor {}
 unsafe impl Sync for CustomCursor {}
 
 impl CustomCursor {
-    pub(crate) fn build(cursor: OnlyCursorImageBuilder, _: &EventLoopWindowTarget) -> CustomCursor {
+    pub(crate) fn new(cursor: OnlyCursorImageSource) -> CustomCursor {
         Self(cursor_from_image(&cursor.0))
     }
 }
@@ -172,19 +172,20 @@ pub(crate) fn invisible_cursor() -> Id<NSCursor> {
         0xA3, 0x9C, 0xB4, 0xDA, 0x8B, 0xB3, 0x3E, 0x05, 0x00, 0x3B,
     ];
 
-    static CURSOR: Lazy<CustomCursor> = Lazy::new(|| {
+    fn new_invisible() -> Id<NSCursor> {
         // TODO: Consider using `dataWithBytesNoCopy:`
         let data = NSData::with_bytes(CURSOR_BYTES);
         let image = NSImage::initWithData(NSImage::alloc(), &data).unwrap();
         let hotspot = NSPoint::new(0.0, 0.0);
-        CustomCursor(NSCursor::initWithImage_hotSpot(
-            NSCursor::alloc(),
-            &image,
-            hotspot,
-        ))
-    });
+        NSCursor::initWithImage_hotSpot(NSCursor::alloc(), &image, hotspot)
+    }
 
-    CURSOR.0.clone()
+    // Cache this for efficiency
+    static CURSOR: OnceLock<CustomCursor> = OnceLock::new();
+    CURSOR
+        .get_or_init(|| CustomCursor(new_invisible()))
+        .0
+        .clone()
 }
 
 pub(crate) fn cursor_from_icon(icon: CursorIcon) -> Id<NSCursor> {

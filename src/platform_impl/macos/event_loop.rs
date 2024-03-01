@@ -1,11 +1,10 @@
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::VecDeque,
     marker::PhantomData,
-    mem,
     os::raw::c_void,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe},
+    panic::{catch_unwind, resume_unwind, RefUnwindSafe, UnwindSafe},
     ptr,
     rc::{Rc, Weak},
     sync::mpsc,
@@ -35,12 +34,12 @@ use super::{
     monitor::{self, MonitorHandle},
     observer::setup_control_flow_observers,
 };
+use crate::platform_impl::platform::cursor::CustomCursor;
+use crate::window::{CustomCursor as RootCustomCursor, CustomCursorSource};
 use crate::{
     error::EventLoopError,
     event::Event,
-    event_loop::{
-        ControlFlow, DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootWindowTarget,
-    },
+    event_loop::{ActiveEventLoop as RootWindowTarget, ControlFlow, DeviceEvents, EventLoopClosed},
     platform::{macos::ActivationPolicy, pump_events::PumpStatus},
 };
 
@@ -73,12 +72,27 @@ impl PanicInfo {
 }
 
 #[derive(Debug)]
-pub struct EventLoopWindowTarget {
+pub struct ActiveEventLoop {
     delegate: Id<ApplicationDelegate>,
     pub(super) mtm: MainThreadMarker,
 }
 
-impl EventLoopWindowTarget {
+impl ActiveEventLoop {
+    pub(super) fn new_root(delegate: Id<ApplicationDelegate>) -> RootWindowTarget {
+        let mtm = MainThreadMarker::from(&*delegate);
+        let p = Self { delegate, mtm };
+        RootWindowTarget {
+            p,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn create_custom_cursor(&self, source: CustomCursorSource) -> RootCustomCursor {
+        RootCustomCursor {
+            inner: CustomCursor::new(source.inner),
+        }
+    }
+
     #[inline]
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
         monitor::available_monitors()
@@ -134,7 +148,7 @@ impl EventLoopWindowTarget {
     }
 }
 
-impl EventLoopWindowTarget {
+impl ActiveEventLoop {
     pub(crate) fn hide_application(&self) {
         NSApplication::sharedApplication(self.mtm).hide(None)
     }
@@ -169,8 +183,8 @@ fn map_user_event<T: 'static>(
 pub struct EventLoop<T: 'static> {
     /// Store a reference to the application for convenience.
     ///
-    /// We intentially don't store `WinitApplication` since we want to have
-    /// the possiblity of swapping that out at some point.
+    /// We intentionally don't store `WinitApplication` since we want to have
+    /// the possibility of swapping that out at some point.
     app: Id<NSApplication>,
     /// The application delegate that we've registered.
     ///
@@ -182,17 +196,8 @@ pub struct EventLoop<T: 'static> {
     sender: mpsc::Sender<T>,
     receiver: Rc<mpsc::Receiver<T>>,
 
-    window_target: Rc<RootWindowTarget>,
+    window_target: RootWindowTarget,
     panic_info: Rc<PanicInfo>,
-
-    /// We make sure that the callback closure is dropped during a panic
-    /// by making the event loop own it.
-    ///
-    /// Every other reference should be a Weak reference which is only upgraded
-    /// into a strong reference in order to call the callback but then the
-    /// strong reference should be dropped as soon as possible.
-    #[allow(clippy::type_complexity)]
-    _callback: Option<Rc<RefCell<dyn FnMut(Event<HandlePendingUserEvents>, &RootWindowTarget)>>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -251,12 +256,11 @@ impl<T> EventLoop<T> {
             delegate: delegate.clone(),
             sender,
             receiver: Rc::new(receiver),
-            window_target: Rc::new(RootWindowTarget {
-                p: EventLoopWindowTarget { delegate, mtm },
+            window_target: RootWindowTarget {
+                p: ActiveEventLoop { delegate, mtm },
                 _marker: PhantomData,
-            }),
+            },
             panic_info,
-            _callback: None,
         })
     }
 
@@ -264,56 +268,25 @@ impl<T> EventLoop<T> {
         &self.window_target
     }
 
-    pub fn run<F>(mut self, callback: F) -> Result<(), EventLoopError>
+    pub fn run<F>(mut self, handler: F) -> Result<(), EventLoopError>
     where
         F: FnMut(Event<T>, &RootWindowTarget),
     {
-        self.run_on_demand(callback)
+        self.run_on_demand(handler)
     }
 
     // NB: we don't base this on `pump_events` because for `MacOs` we can't support
     // `pump_events` elegantly (we just ask to run the loop for a "short" amount of
     // time and so a layered implementation would end up using a lot of CPU due to
     // redundant wake ups.
-    pub fn run_on_demand<F>(&mut self, callback: F) -> Result<(), EventLoopError>
+    pub fn run_on_demand<F>(&mut self, handler: F) -> Result<(), EventLoopError>
     where
         F: FnMut(Event<T>, &RootWindowTarget),
     {
-        let callback = map_user_event(callback, self.receiver.clone());
+        let handler = map_user_event(handler, self.receiver.clone());
 
-        // # Safety
-        // We are erasing the lifetime of the application callback here so that we
-        // can (temporarily) store it within 'static app delegate that's
-        // accessible to objc delegate callbacks.
-        //
-        // The safety of this depends on on making sure to also clear the callback
-        // from the app delegate before we return from here, ensuring that we don't
-        // retain a reference beyond the real lifetime of the callback.
-        let callback = unsafe {
-            mem::transmute::<
-                Rc<RefCell<dyn FnMut(Event<HandlePendingUserEvents>, &RootWindowTarget)>>,
-                Rc<RefCell<dyn FnMut(Event<HandlePendingUserEvents>, &RootWindowTarget)>>,
-            >(Rc::new(RefCell::new(callback)))
-        };
-
-        self._callback = Some(Rc::clone(&callback));
-
-        autoreleasepool(|_| {
-            // A bit of juggling with the callback references to make sure
-            // that `self.callback` is the only owner of the callback.
-            let weak_cb: Weak<_> = Rc::downgrade(&callback);
-            drop(callback);
-
-            // # Safety
-            // We make sure to call `delegate.clear_callback` before returning
-            unsafe {
-                self.delegate
-                    .set_callback(weak_cb, Rc::clone(&self.window_target));
-            }
-
-            // catch panics to make sure we can't unwind without clearing the set callback
-            // (which would leave the app delegate in an undefined, unsafe state)
-            let catch_result = catch_unwind(AssertUnwindSafe(|| {
+        self.delegate.set_event_handler(handler, || {
+            autoreleasepool(|_| {
                 // clear / normalize pump_events state
                 self.delegate.set_wait_timeout(None);
                 self.delegate.set_stop_before_wait(false);
@@ -325,6 +298,8 @@ impl<T> EventLoop<T> {
                     self.delegate.set_is_running(true);
                     self.delegate.dispatch_init_events();
                 }
+
+                // SAFETY: We do not run the application re-entrantly
                 unsafe { self.app.run() };
 
                 // While the app is running it's possible that we catch a panic
@@ -337,73 +312,28 @@ impl<T> EventLoop<T> {
                 }
 
                 self.delegate.internal_exit()
-            }));
-
-            // # Safety
-            // This pairs up with the `unsafe` call to `set_callback` above and ensures that
-            // we always clear the application callback from the app delegate before returning.
-            drop(self._callback.take());
-            self.delegate.clear_callback();
-
-            if let Err(payload) = catch_result {
-                resume_unwind(payload)
-            }
+            })
         });
 
         Ok(())
     }
 
-    pub fn pump_events<F>(&mut self, timeout: Option<Duration>, callback: F) -> PumpStatus
+    pub fn pump_events<F>(&mut self, timeout: Option<Duration>, handler: F) -> PumpStatus
     where
         F: FnMut(Event<T>, &RootWindowTarget),
     {
-        let callback = map_user_event(callback, self.receiver.clone());
+        let handler = map_user_event(handler, self.receiver.clone());
 
-        // # Safety
-        // We are erasing the lifetime of the application callback here so that we
-        // can (temporarily) store it within 'static global app delegate that's
-        // accessible to objc delegate callbacks.
-        //
-        // The safety of this depends on on making sure to also clear the callback
-        // from the app delegate before we return from here, ensuring that we don't
-        // retain a reference beyond the real lifetime of the callback.
-
-        let callback = unsafe {
-            mem::transmute::<
-                Rc<RefCell<dyn FnMut(Event<HandlePendingUserEvents>, &RootWindowTarget)>>,
-                Rc<RefCell<dyn FnMut(Event<HandlePendingUserEvents>, &RootWindowTarget)>>,
-            >(Rc::new(RefCell::new(callback)))
-        };
-
-        self._callback = Some(Rc::clone(&callback));
-
-        autoreleasepool(|_| {
-            // A bit of juggling with the callback references to make sure
-            // that `self.callback` is the only owner of the callback.
-            let weak_cb: Weak<_> = Rc::downgrade(&callback);
-            drop(callback);
-
-            // # Safety
-            // We will make sure to call `delegate.clear_callback` before returning
-            // to ensure that we don't hold on to the callback beyond its (erased)
-            // lifetime
-            unsafe {
-                self.delegate
-                    .set_callback(weak_cb, Rc::clone(&self.window_target));
-            }
-
-            // catch panics to make sure we can't unwind without clearing the set callback
-            // (which would leave the app delegate in an undefined, unsafe state)
-            let catch_result = catch_unwind(AssertUnwindSafe(|| {
+        self.delegate.set_event_handler(handler, || {
+            autoreleasepool(|_| {
                 // As a special case, if the application hasn't been launched yet then we at least run
                 // the loop until it has fully launched.
                 if !self.delegate.is_launched() {
                     debug_assert!(!self.delegate.is_running());
 
                     self.delegate.set_stop_on_launch();
-                    unsafe {
-                        self.app.run();
-                    }
+                    // SAFETY: We do not run the application re-entrantly
+                    unsafe { self.app.run() };
 
                     // Note: we dispatch `NewEvents(Init)` + `Resumed` events after the application has launched
                 } else if !self.delegate.is_running() {
@@ -432,9 +362,8 @@ impl<T> EventLoop<T> {
                         }
                     }
                     self.delegate.set_stop_on_redraw(true);
-                    unsafe {
-                        self.app.run();
-                    }
+                    // SAFETY: We do not run the application re-entrantly
+                    unsafe { self.app.run() };
                 }
 
                 // While the app is running it's possible that we catch a panic
@@ -452,18 +381,7 @@ impl<T> EventLoop<T> {
                 } else {
                     PumpStatus::Continue
                 }
-            }));
-
-            // # Safety
-            // This pairs up with the `unsafe` call to `set_callback` above and ensures that
-            // we always clear the application callback from the app delegate before returning
-            self.delegate.clear_callback();
-            drop(self._callback.take());
-
-            match catch_result {
-                Ok(pump_status) => pump_status,
-                Err(payload) => resume_unwind(payload),
-            }
+            })
         })
     }
 
@@ -532,6 +450,7 @@ pub struct EventLoopProxy<T> {
 }
 
 unsafe impl<T: Send> Send for EventLoopProxy<T> {}
+unsafe impl<T: Send> Sync for EventLoopProxy<T> {}
 
 impl<T> Drop for EventLoopProxy<T> {
     fn drop(&mut self) {

@@ -1,7 +1,7 @@
 #![cfg(x11_platform)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CStr;
 use std::fmt;
 use std::marker::PhantomData;
@@ -17,7 +17,7 @@ use std::{ptr, slice, str};
 use calloop::generic::Generic;
 use calloop::EventLoop as Loop;
 use calloop::{ping::Ping, Readiness};
-use libc::{self, setlocale, LC_CTYPE};
+use libc::{setlocale, LC_CTYPE};
 use log::warn;
 
 use x11rb::connection::RequestConnection;
@@ -28,15 +28,16 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::x11_utils::X11Error as LogicalError;
 use x11rb::xcb_ffi::ReplyOrIdError;
 
-use super::{common::xkb_state::KbdState, ControlFlow, OsError};
-use crate::{
-    error::{EventLoopError, OsError as RootOsError},
-    event::{Event, StartCause, WindowEvent},
-    event_loop::{DeviceEvents, EventLoopClosed, EventLoopWindowTarget as RootELW},
-    platform::pump_events::PumpStatus,
-    platform_impl::platform::{min_timeout, WindowId},
-    window::WindowAttributes,
+use crate::error::{EventLoopError, OsError as RootOsError};
+use crate::event::{Event, StartCause, WindowEvent};
+use crate::event_loop::{ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents, EventLoopClosed};
+use crate::platform::pump_events::PumpStatus;
+use crate::platform_impl::common::xkb::Context;
+use crate::platform_impl::platform::{min_timeout, WindowId};
+use crate::platform_impl::{
+    ActiveEventLoop as PlatformActiveEventLoop, OsError, PlatformCustomCursor,
 };
+use crate::window::{CustomCursor as RootCustomCursor, CustomCursorSource, WindowAttributes};
 
 mod activation;
 mod atoms;
@@ -50,20 +51,23 @@ mod window;
 mod xdisplay;
 mod xsettings;
 
+pub use util::CustomCursor;
+
 use atoms::*;
 use dnd::{Dnd, DndState};
-use event_processor::EventProcessor;
+use event_processor::{EventProcessor, MAX_MOD_REPLAY_LEN};
 use ime::{Ime, ImeCreationError, ImeReceiver, ImeRequest, ImeSender};
 pub(crate) use monitor::{MonitorHandle, VideoModeHandle};
 use window::UnownedWindow;
 pub(crate) use xdisplay::{XConnection, XError, XNotSupported};
 
-pub use util::CustomCursor;
-
 // Xinput constants not defined in x11rb
 const ALL_DEVICES: u16 = 0;
 const ALL_MASTER_DEVICES: u16 = 1;
 const ICONIC_STATE: u32 = 3;
+
+/// The underlying x11rb connection that we are using.
+type X11rbConnection = x11rb::xcb_ffi::XCBConnection;
 
 type X11Source = Generic<BorrowedFd<'static>>;
 
@@ -125,7 +129,7 @@ impl<T> PeekableReceiver<T> {
     }
 }
 
-pub struct EventLoopWindowTarget {
+pub struct ActiveEventLoop {
     xconn: Arc<XConnection>,
     wm_delete_window: xproto::Atom,
     net_wm_ping: xproto::Atom,
@@ -281,10 +285,13 @@ impl<T: 'static> EventLoop<T> {
         // Create a channel for sending user events.
         let (user_sender, user_channel) = mpsc::channel();
 
-        let kb_state =
-            KbdState::from_x11_xkb(xconn.xcb_connection().get_raw_xcb_connection()).unwrap();
+        let xkb_context =
+            Context::from_x11_xkb(xconn.xcb_connection().get_raw_xcb_connection()).unwrap();
 
-        let window_target = EventLoopWindowTarget {
+        let mut xmodmap = util::ModifierKeymap::new();
+        xmodmap.reload_from_x_connection(&xconn);
+
+        let window_target = ActiveEventLoop {
             ime,
             root,
             control_flow: Cell::new(ControlFlow::default()),
@@ -308,8 +315,8 @@ impl<T: 'static> EventLoop<T> {
         // Set initial device event filter.
         window_target.update_listen_device_events(true);
 
-        let root_window_target = RootELW {
-            p: super::EventLoopWindowTarget::X(window_target),
+        let root_window_target = RootAEL {
+            p: PlatformActiveEventLoop::X(window_target),
             _marker: PhantomData,
         };
 
@@ -321,8 +328,10 @@ impl<T: 'static> EventLoop<T> {
             ime_receiver,
             ime_event_receiver,
             xi2ext,
+            xfiltered_modifiers: VecDeque::with_capacity(MAX_MOD_REPLAY_LEN),
+            xmodmap,
             xkbext,
-            kb_state,
+            xkb_context,
             num_touch: 0,
             held_key_press: None,
             first_touch: None,
@@ -378,13 +387,13 @@ impl<T: 'static> EventLoop<T> {
         }
     }
 
-    pub(crate) fn window_target(&self) -> &RootELW {
+    pub(crate) fn window_target(&self) -> &RootAEL {
         &self.event_processor.target
     }
 
     pub fn run_on_demand<F>(&mut self, mut event_handler: F) -> Result<(), EventLoopError>
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         let exit = loop {
             match self.pump_events(None, &mut event_handler) {
@@ -414,7 +423,7 @@ impl<T: 'static> EventLoop<T> {
 
     pub fn pump_events<F>(&mut self, timeout: Option<Duration>, mut callback: F) -> PumpStatus
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         if !self.loop_running {
             self.loop_running = true;
@@ -447,7 +456,7 @@ impl<T: 'static> EventLoop<T> {
 
     pub fn poll_events_with_timeout<F>(&mut self, mut timeout: Option<Duration>, mut callback: F)
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         let start = Instant::now();
 
@@ -525,7 +534,7 @@ impl<T: 'static> EventLoop<T> {
 
     fn single_iteration<F>(&mut self, callback: &mut F, cause: StartCause)
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         callback(Event::NewEvents(cause), &self.event_processor.target);
 
@@ -599,7 +608,7 @@ impl<T: 'static> EventLoop<T> {
 
     fn drain_events<F>(&mut self, callback: &mut F)
     where
-        F: FnMut(Event<T>, &RootELW),
+        F: FnMut(Event<T>, &RootAEL),
     {
         let mut xev = MaybeUninit::uninit();
 
@@ -654,7 +663,7 @@ impl<T> AsRawFd for EventLoop<T> {
     }
 }
 
-impl EventLoopWindowTarget {
+impl ActiveEventLoop {
     /// Returns the `XConnection` of this events loop.
     #[inline]
     pub(crate) fn x_connection(&self) -> &Arc<XConnection> {
@@ -667,6 +676,12 @@ impl EventLoopWindowTarget {
 
     pub fn primary_monitor(&self) -> Option<MonitorHandle> {
         self.xconn.primary_monitor().ok()
+    }
+
+    pub(crate) fn create_custom_cursor(&self, cursor: CustomCursorSource) -> RootCustomCursor {
+        RootCustomCursor {
+            inner: PlatformCustomCursor::X(CustomCursor::new(self, cursor.inner)),
+        }
     }
 
     pub fn listen_device_events(&self, allowed: DeviceEvents) {
@@ -814,7 +829,7 @@ impl Deref for Window {
 
 impl Window {
     pub(crate) fn new(
-        event_loop: &EventLoopWindowTarget,
+        event_loop: &ActiveEventLoop,
         attribs: WindowAttributes,
     ) -> Result<Self, RootOsError> {
         let window = Arc::new(UnownedWindow::new(event_loop, attribs)?);
@@ -973,9 +988,6 @@ impl From<xsettings::ParserError> for X11Error {
     }
 }
 
-/// The underlying x11rb connection that we are using.
-type X11rbConnection = x11rb::xcb_ffi::XCBConnection;
-
 /// Type alias for a void cookie.
 type VoidCookie<'a> = x11rb::cookie::VoidCookie<'a, X11rbConnection>;
 
@@ -988,34 +1000,6 @@ trait CookieResultExt {
 impl<'a, E: fmt::Debug> CookieResultExt for Result<VoidCookie<'a>, E> {
     fn expect_then_ignore_error(self, msg: &str) {
         self.expect(msg).ignore_error()
-    }
-}
-
-/// XEvents of type GenericEvent store their actual data in an XGenericEventCookie data structure. This is a wrapper to
-/// extract the cookie from a GenericEvent XEvent and release the cookie data once it has been processed
-struct GenericEventCookie<'a> {
-    xconn: &'a XConnection,
-    cookie: ffi::XGenericEventCookie,
-}
-
-impl<'a> GenericEventCookie<'a> {
-    fn from_event(xconn: &XConnection, event: ffi::XEvent) -> Option<GenericEventCookie<'_>> {
-        unsafe {
-            let mut cookie: ffi::XGenericEventCookie = From::from(event);
-            if (xconn.xlib.XGetEventData)(xconn.display, &mut cookie) == ffi::True {
-                Some(GenericEventCookie { xconn, cookie })
-            } else {
-                None
-            }
-        }
-    }
-}
-
-impl<'a> Drop for GenericEventCookie<'a> {
-    fn drop(&mut self) {
-        unsafe {
-            (self.xconn.xlib.XFreeEventData)(self.xconn.display, &mut self.cookie);
-        }
     }
 }
 
