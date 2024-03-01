@@ -11,7 +11,7 @@ use std::{collections::VecDeque, env, fmt};
 use std::{ffi::CStr, mem::MaybeUninit, os::raw::*, sync::Mutex};
 
 #[cfg(x11_platform)]
-use once_cell::sync::Lazy;
+use crate::utils::Lazy;
 use smol_str::SmolStr;
 
 #[cfg(x11_platform)]
@@ -647,8 +647,7 @@ pub(crate) enum PlatformCustomCursor {
 
 /// Hooks for X11 errors.
 #[cfg(x11_platform)]
-pub(crate) static mut XLIB_ERROR_HOOKS: Lazy<Mutex<Vec<XlibErrorHook>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+pub(crate) static mut XLIB_ERROR_HOOKS: Mutex<Vec<XlibErrorHook>> = Mutex::new(Vec::new());
 
 #[cfg(x11_platform)]
 unsafe extern "C" fn x_error_callback(
