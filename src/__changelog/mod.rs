@@ -4,8 +4,12 @@
 //! along with migration instructions for larger changes.
 
 // Put the current changelog entry at the top of rustdoc output.
+#[cfg(unreleased_changelogs)]
 pub use unreleased as current;
+#[cfg(not(unreleased_changelogs))]
+pub use v0_29 as current;
 
+#[cfg(unreleased_changelogs)]
 #[doc = include_str!("unreleased.md")]
 pub mod unreleased {}
 
