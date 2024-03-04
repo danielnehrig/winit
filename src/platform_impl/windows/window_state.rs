@@ -296,6 +296,7 @@ impl WindowFlags {
             style &= !WS_OVERLAPPEDWINDOW;
         }
 
+        style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED;
         (style, style_ex)
     }
 
